@@ -144,7 +144,11 @@ export async function getChatResponse(business, history, newMessage) {
  * Static string — no Claude call — so it arrives within seconds, not 1-2s.
  */
 export function getInitialMessage(businessName) {
-  // Strip trailing period so "Aurora Plumbing Co." doesn't become "Co.." in the SMS.
-  const name = businessName.replace(/\.$/,  "");
+  // Defensive guard: schema enforces NOT NULL on businesses.name, but this
+  // function shouldn't assume that's always true upstream — a null/undefined
+  // name would otherwise throw on .replace() and silently kill the SMS send
+  // inside voice.js's try/catch, meaning the customer never gets a text.
+  const safeName = businessName || 'our business';
+  const name = safeName.replace(/\.$/, '');
   return `Hi! You just missed a call from ${name}. We want to make sure you get the help you need — what can we assist you with today?`;
 }

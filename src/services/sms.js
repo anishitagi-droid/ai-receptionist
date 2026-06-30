@@ -84,6 +84,13 @@ export async function notifyOwnerEmergency(business, reason, callerPhone) {
  * Format a raw E.164 phone number as (XXX) XXX-XXXX for human readability.
  */
 function formatPhone(phone) {
+  // Defensive guard: callerPhone normally always comes from Twilio's From
+  // field on a real request, but NODE_ENV=development intentionally skips
+  // signature validation for local testing, so malformed input CAN reach
+  // here during dev work. Without this guard, .replace() on undefined/null
+  // throws and notifyOwner never sends — meaning a real captured lead never
+  // reaches the business owner.
+  if (!phone) return 'Unknown number';
   const digits = phone.replace(/\D/g, '');
   if (digits.length === 11 && digits[0] === '1') {
     const d = digits.slice(1);
