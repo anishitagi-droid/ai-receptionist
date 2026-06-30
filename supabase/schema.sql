@@ -68,6 +68,22 @@ CREATE INDEX idx_conversations_status     ON conversations(status);
 CREATE INDEX idx_messages_conversation    ON messages(conversation_id, created_at);
 CREATE INDEX idx_leads_business           ON leads(business_id, created_at);
 
+-- ─── Concurrency safety: one active conversation per caller ──────────────────
+-- Without this, two simultaneous /sms webhooks for the same caller (e.g. they
+-- send two texts within milliseconds of each other, or Twilio retries a
+-- webhook delivery) could both pass the "no active conversation exists" check
+-- in getOrCreateConversation() and both INSERT a new row. That splits message
+-- history across two threads, confuses Claude's context, and can trigger the
+-- owner notification twice for what should be a single lead.
+--
+-- This partial unique index makes it impossible for two ACTIVE rows to exist
+-- for the same (caller_phone, business_id) pair. The second concurrent INSERT
+-- will fail with a unique violation (error code 23505), which db/index.js
+-- catches and converts into a re-fetch of the row the other request created.
+CREATE UNIQUE INDEX idx_unique_active_conversation
+  ON conversations (caller_phone, business_id)
+  WHERE status = 'active';
+
 -- ─── increment_message_count RPC ─────────────────────────────────────────────
 -- Called by db/index.js to safely increment a conversation's message count.
 -- Using a SQL function makes the increment ATOMIC — a plain read-then-write

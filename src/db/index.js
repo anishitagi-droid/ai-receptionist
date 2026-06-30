@@ -57,14 +57,37 @@ export async function getOrCreateConversation(callerPhone, businessId) {
   if (fetchError) throw new Error(`Failed to check existing conversation: ${fetchError.message}`);
   if (existing) return { conversation: existing, isNew: false };
 
-  // No active conversation — create one
+  // No active conversation found — try to create one.
   const { data: newConvo, error: createError } = await db()
     .from('conversations')
     .insert({ caller_phone: callerPhone, business_id: businessId, status: 'active' })
     .select()
     .single();
 
-  if (createError) throw new Error(`Failed to create conversation: ${createError.message}`);
+  if (createError) {
+    // RACE CONDITION HANDLING: Postgres error 23505 = unique_violation.
+    // This fires when two simultaneous /sms requests for the same caller
+    // both passed the check above and both tried to INSERT. The schema's
+    // idx_unique_active_conversation index lets only one INSERT succeed —
+    // the loser lands here. Instead of throwing (which would 500 a perfectly
+    // legitimate incoming text), re-fetch the row the winning request just
+    // created and use that instead. This makes the function safe under
+    // concurrent calls without needing application-level locking.
+    if (createError.code === '23505') {
+      const { data: winner, error: refetchError } = await db()
+        .from('conversations')
+        .select('*')
+        .eq('caller_phone', callerPhone)
+        .eq('business_id', businessId)
+        .eq('status', 'active')
+        .single();
+
+      if (refetchError) throw new Error(`Failed to recover from conversation race condition: ${refetchError.message}`);
+      return { conversation: winner, isNew: false };
+    }
+    throw new Error(`Failed to create conversation: ${createError.message}`);
+  }
+
   return { conversation: newConvo, isNew: true };
 }
 
