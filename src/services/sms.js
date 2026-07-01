@@ -42,39 +42,49 @@ export async function sendSMS(to, from, body) {
  * @param {string} callerPhone - The caller's phone number
  */
 export async function notifyOwner(business, leadData, callerPhone) {
-  const name          = leadData.name         || 'Not provided';
-  const issue         = leadData.issue        || 'Not specified';
+  const name          = leadData.name          || 'Not provided';
+  const issue         = leadData.issue         || 'Not specified';
   const preferredTime = leadData.preferred_time || 'No preference given';
-
-  // Format the caller's number for readability
   const formattedCaller = formatPhone(callerPhone);
 
+  // BUG FIX: Previous version used U+2500 box-drawing chars and emoji.
+  // These force UCS-2 SMS encoding (70 chars/segment instead of 160),
+  // doubling Twilio costs and rendering as "?" on some older phones.
+  // Plain ASCII keeps segments at 160 chars -- fits in 2 segments not 4.
   const message =
-    `🔔 NEW LEAD — ${business.name}\n` +
-    `──────────────────\n` +
-    `Name: ${name}\n` +
-    `Phone: ${formattedCaller}\n` +
-    `Issue: ${issue}\n` +
-    `Best time to call: ${preferredTime}\n` +
-    `──────────────────\n` +
-    `Reply to this number to reach them.`;
+    `NEW LEAD - ${business.name}
+` +
+    `---
+` +
+    `Name: ${name}
+` +
+    `Phone: ${formattedCaller}
+` +
+    `Issue: ${issue}
+` +
+    `Best time: ${preferredTime}
+` +
+    `---
+` +
+    `Reply to reach them.`;
 
   await sendSMS(business.owner_phone, business.twilio_number, message);
 }
 
-/**
- * Notify the owner of an emergency escalation.
- * Sent immediately, skips normal lead flow.
- */
 export async function notifyOwnerEmergency(business, reason, callerPhone) {
   const formattedCaller = formatPhone(callerPhone);
 
   const message =
-    `🚨 EMERGENCY — ${business.name}\n` +
-    `──────────────────\n` +
-    `Caller: ${formattedCaller}\n` +
-    `Reason: ${reason}\n` +
-    `──────────────────\n` +
+    `EMERGENCY - ${business.name}
+` +
+    `---
+` +
+    `Caller: ${formattedCaller}
+` +
+    `Reason: ${reason}
+` +
+    `---
+` +
     `Call them back immediately.`;
 
   await sendSMS(business.owner_phone, business.twilio_number, message);

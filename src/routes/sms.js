@@ -11,8 +11,8 @@
 //  6. Load full message history for Claude context
 //  7. Get Claude's response + parse for embedded signals
 //  8. Handle signals (spam, emergency escalation)
-//  9. Send the reply SMS, save both messages to DB
-// 10. If lead captured → save lead + notify owner
+//  9. Save messages to DB first, THEN send SMS (so history is always consistent)
+// 10. If lead captured → close conversation first, then notify owner
 
 import { Router } from 'express';
 import { validateTwilioSignature } from '../middleware/validateTwilio.js';
@@ -34,8 +34,6 @@ const router = Router();
 // ─── POST /sms ────────────────────────────────────────────────────────────────
 router.post('/', validateTwilioSignature, async (req, res) => {
   // ACK Twilio immediately — must respond within 10 seconds or Twilio retries.
-  // We reply to the caller via the Twilio REST API below, not via TwiML here.
-  // BUG FIX: must set Content-Type: text/xml — Twilio expects it even for empty responses.
   res.status(200).type('text/xml').send('<Response></Response>');
 
   const {
@@ -44,8 +42,7 @@ router.post('/', validateTwilioSignature, async (req, res) => {
     Body: rawBody,
   } = req.body;
 
-  // BUG FIX: Body can be undefined for MMS-only messages or malformed webhooks.
-  // Calling .trim() on undefined throws a TypeError that kills the entire handler.
+  // Body can be undefined for MMS-only messages or malformed webhooks.
   const incomingText = rawBody?.trim();
   if (!incomingText) {
     console.log(`Empty or missing Body from ${callerPhone} — skipping`);
@@ -74,7 +71,7 @@ router.post('/', validateTwilioSignature, async (req, res) => {
     }
 
     // ── 5. Load history + get Claude response ──────────────────────────────
-    const history  = await getMessages(conversation.id);
+    const history = await getMessages(conversation.id);
     const { smsText, leadData, isSpam, escalation } = await getChatResponse(
       business,
       history,
@@ -86,7 +83,7 @@ router.post('/', validateTwilioSignature, async (req, res) => {
       console.log(`Spam detected from ${callerPhone}`);
       await saveMessage(conversation.id, 'user', incomingText);
       await updateConversationStatus(conversation.id, 'spam');
-      return; // No reply — just close the conversation
+      return;
     }
 
     // ── 7. Handle emergency escalation ────────────────────────────────────
@@ -94,56 +91,100 @@ router.post('/', validateTwilioSignature, async (req, res) => {
       console.log(`Emergency escalation from ${callerPhone}: ${escalation.reason}`);
       await saveMessage(conversation.id, 'user', incomingText);
       await saveMessage(conversation.id, 'assistant', smsText);
+      await incrementMessageCount(conversation.id);
+      await updateConversationStatus(conversation.id, 'escalated');
+      // Send AFTER DB writes — history is safe even if Twilio fails
       await sendSMS(callerPhone, twilioNumber, smsText);
       await notifyOwnerEmergency(business, escalation.reason, callerPhone);
-      await updateConversationStatus(conversation.id, 'escalated');
-      await incrementMessageCount(conversation.id);
       return;
     }
 
-    // ── 8. Normal reply: send SMS and save to DB ───────────────────────────
-    await sendSMS(callerPhone, twilioNumber, smsText);
+    // ── 8. Normal reply ────────────────────────────────────────────────────
+    // BUG FIX: Save to DB BEFORE sending the SMS.
+    // If sendSMS is called first and DB writes then fail, Claude's message
+    // history is missing this exchange. On the caller's next text, Claude
+    // loses context and may ask for info the customer already provided.
+    // Saving first means history is always consistent. If sendSMS then fails,
+    // the outer catch sends a fallback SMS — the customer gets a "technical
+    // issue" message rather than silence.
     await saveMessage(conversation.id, 'user', incomingText);
     await saveMessage(conversation.id, 'assistant', smsText);
     await incrementMessageCount(conversation.id);
+    await sendSMS(callerPhone, twilioNumber, smsText);
 
     // ── 9. Lead captured ───────────────────────────────────────────────────
     if (leadData) {
       console.log(`Lead captured for ${business.name}:`, leadData);
       const lead = await saveLead(conversation.id, business.id, callerPhone, leadData);
+
+      // BUG FIX: Close the conversation BEFORE notifying the owner.
+      // If notifyOwner fails (Twilio error), the conversation is still correctly
+      // closed. Without this order, a Twilio failure would leave the conversation
+      // active, Claude would capture the lead again on the next message, and the
+      // owner would get duplicate lead notifications when Twilio recovered.
       await updateConversationStatus(conversation.id, 'lead_captured');
-      await notifyOwner(business, leadData, callerPhone);
-      await markLeadNotified(lead.id);
+
+      // Notify owner separately — failure here doesn't corrupt state.
+      // The lead is saved in DB with owner_notified=false, which is accurate.
+      try {
+        await notifyOwner(business, leadData, callerPhone);
+        await markLeadNotified(lead.id);
+      } catch (notifyErr) {
+        // Log and move on — the lead is not lost, owner_notified stays false.
+        // Future enhancement: a cron job could retry unnotified leads.
+        console.error(`Failed to notify owner for lead ${lead.id}:`, notifyErr.message);
+      }
     }
 
   } catch (err) {
     console.error('SMS handler error:', err.message, '\n', err.stack);
-    // Best-effort fallback: let the caller know something went wrong
-    try {
-      await sendSMS(
-        req.body.From,
-        req.body.To,
-        "Sorry, we hit a technical issue. Please call us directly — we want to help!"
-      );
-    } catch (fallbackErr) {
-      console.error('Fallback SMS failed:', fallbackErr.message);
+    // Best-effort fallback using already-scoped variables (not req.body.*)
+    if (callerPhone && twilioNumber) {
+      try {
+        await sendSMS(
+          callerPhone,
+          twilioNumber,
+          "Sorry, we hit a technical issue. Please call us directly — we want to help!"
+        );
+      } catch (fallbackErr) {
+        console.error('Fallback SMS failed:', fallbackErr.message);
+      }
     }
   }
 });
 
-// ─── Helper: too many messages without a captured lead ───────────────────────
+// ─── Helper: too many messages without a captured lead ────────────────────────
 async function handleMaxMessagesReached(business, conversation, callerPhone, twilioNumber) {
-  await sendSMS(
-    callerPhone,
-    twilioNumber,
-    `We want to make sure you get taken care of! I'll have someone from ${business.name} call you directly as soon as possible.`
-  );
-  await sendSMS(
-    business.owner_phone,
-    twilioNumber,
-    `📋 FOLLOW-UP NEEDED — ${business.name}\n──────────────────\nCaller: ${callerPhone}\nReason: Hit message limit without capturing lead.\nAction: Call them back directly.`
-  );
+  // BUG FIX: This function previously had no try/catch. If the first sendSMS
+  // threw, updateConversationStatus was never called. The conversation stayed
+  // active with message_count >= max_messages, so every subsequent message
+  // from this caller re-entered this function — infinite error loop.
+  // Fix: always close the conversation first, then attempt SMS best-effort.
   await updateConversationStatus(conversation.id, 'escalated');
+
+  try {
+    await sendSMS(
+      callerPhone,
+      twilioNumber,
+      `We want to make sure you get taken care of! I'll have someone from ${business.name} call you directly as soon as possible.`
+    );
+  } catch (err) {
+    console.error(`Failed to send max-messages SMS to caller ${callerPhone}:`, err.message);
+  }
+
+  try {
+    await sendSMS(
+      business.owner_phone,
+      twilioNumber,
+      `FOLLOW-UP NEEDED - ${business.name}\n` +
+      `---\n` +
+      `Caller: ${callerPhone}\n` +
+      `Reason: Hit message limit without capturing lead.\n` +
+      `Action: Call them back directly.`
+    );
+  } catch (err) {
+    console.error(`Failed to send max-messages alert to owner ${business.owner_phone}:`, err.message);
+  }
 }
 
 export default router;
