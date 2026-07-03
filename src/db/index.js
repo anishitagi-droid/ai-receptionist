@@ -37,27 +37,45 @@ export async function getBusinessByTwilioNumber(twilioNumber) {
 // ─── Conversations ────────────────────────────────────────────────────────────
 
 /**
- * Get an existing active conversation OR create a new one.
+ * Get an existing conversation OR create a new one.
  *
- * Uses .maybeSingle() (not .single()) because zero rows is the normal case
- * for first-time callers. .single() throws PGRST116 on zero rows; .maybeSingle()
- * returns data: null with no error, which is what we actually want here.
+ * IMPORTANT: Returns ANY recent conversation for this caller, not just active ones.
+ * This is intentional — the status guard in sms.js (step 3) needs to see the
+ * actual status of the last conversation to decide whether to process the message.
+ *
+ * If we only returned active conversations, a caller who texts AFTER their lead
+ * is captured would get a brand new active conversation created (since the closed
+ * one isn't found), the status guard would see 'active', and Claude would treat
+ * them as a new caller — re-asking for their name even though they were already
+ * qualified. This is the actual bug: the status guard is bypassed because
+ * getOrCreateConversation creates a new conversation before the guard can fire.
+ *
+ * Fix: fetch the most recent conversation regardless of status. If it's closed
+ * (lead_captured, escalated, spam), return it — the status guard in sms.js will
+ * correctly block the message. Only create a new conversation if there is truly
+ * no prior conversation at all, or if the most recent one is 'completed' (a
+ * deliberate terminal state meaning the business closed it intentionally).
  */
 export async function getOrCreateConversation(callerPhone, businessId) {
-  const { data: existing, error: fetchError } = await db()
+  // Fetch most recent conversation regardless of status
+  const { data: recent, error: fetchError } = await db()
     .from('conversations')
     .select('*')
     .eq('caller_phone', callerPhone)
     .eq('business_id', businessId)
-    .eq('status', 'active')
     .order('created_at', { ascending: false })
     .limit(1)
-    .maybeSingle(); // KEY FIX: .single() would throw PGRST116 for first-time callers
+    .maybeSingle();
 
   if (fetchError) throw new Error(`Failed to check existing conversation: ${fetchError.message}`);
-  if (existing) return { conversation: existing, isNew: false };
 
-  // No active conversation found — try to create one.
+  // If there's a conversation that isn't in a terminal "completed" state,
+  // return it so the caller can either continue (active) or be blocked (closed).
+  if (recent && recent.status !== 'completed') {
+    return { conversation: recent, isNew: false };
+  }
+
+  // No prior conversation, or only a 'completed' one — create a fresh one.
   const { data: newConvo, error: createError } = await db()
     .from('conversations')
     .insert({ caller_phone: callerPhone, business_id: businessId, status: 'active' })
@@ -65,14 +83,8 @@ export async function getOrCreateConversation(callerPhone, businessId) {
     .single();
 
   if (createError) {
-    // RACE CONDITION HANDLING: Postgres error 23505 = unique_violation.
-    // This fires when two simultaneous /sms requests for the same caller
-    // both passed the check above and both tried to INSERT. The schema's
-    // idx_unique_active_conversation index lets only one INSERT succeed —
-    // the loser lands here. Instead of throwing (which would 500 a perfectly
-    // legitimate incoming text), re-fetch the row the winning request just
-    // created and use that instead. This makes the function safe under
-    // concurrent calls without needing application-level locking.
+    // RACE CONDITION: 23505 = unique constraint on idx_unique_active_conversation.
+    // Two concurrent requests both passed the check above. Re-fetch the winner.
     if (createError.code === '23505') {
       const { data: winner, error: refetchError } = await db()
         .from('conversations')
