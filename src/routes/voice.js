@@ -80,15 +80,22 @@ router.post('/no-answer', validateTwilioSignature, async (req, res) => {
 
   try {
     const business = await getBusinessByTwilioNumber(twilioNumber);
-    const { conversation } = await getOrCreateConversation(callerPhone, business.id);
+    const { conversation, isNew } = await getOrCreateConversation(callerPhone, business.id);
 
-    // Send the initial SMS immediately — static string, no Claude call,
-    // so it arrives within a second or two of the missed call.
-    const initialMsg = getInitialMessage(business.name);
-    await sendSMS(callerPhone, twilioNumber, initialMsg);
-    await saveMessage(conversation.id, 'assistant', initialMsg);
-
-    console.log(`Initial SMS sent to ${callerPhone} for: ${business.name}`);
+    // BUG FIX: Only send the initial SMS when this is a genuinely new conversation.
+    // Twilio retries webhooks if your server takes >10s or returns a non-2xx.
+    // Without this check, a retry fires sendSMS again — the caller gets two
+    // identical "Hi! You just missed a call" texts within seconds of each other,
+    // which looks broken and unprofessional. The duplicate also pollutes Claude's
+    // history (two identical opening messages confuse the conversation context).
+    if (isNew) {
+      const initialMsg = getInitialMessage(business.name);
+      await sendSMS(callerPhone, twilioNumber, initialMsg);
+      await saveMessage(conversation.id, 'assistant', initialMsg);
+      console.log(`Initial SMS sent to ${callerPhone} for: ${business.name}`);
+    } else {
+      console.log(`Duplicate no-answer webhook for ${callerPhone} — conversation already exists, skipping SMS`);
+    }
   } catch (err) {
     console.error('Error handling missed call:', err.message);
   }

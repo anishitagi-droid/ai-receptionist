@@ -94,23 +94,30 @@ router.post('/', validateTwilioSignature, async (req, res) => {
       await incrementMessageCount(conversation.id);
       await updateConversationStatus(conversation.id, 'escalated');
       // Send AFTER DB writes — history is safe even if Twilio fails
-      await sendSMS(callerPhone, twilioNumber, smsText);
+      if (smsText) await sendSMS(callerPhone, twilioNumber, smsText);
       await notifyOwnerEmergency(business, escalation.reason, callerPhone);
       return;
     }
 
     // ── 8. Normal reply ────────────────────────────────────────────────────
-    // BUG FIX: Save to DB BEFORE sending the SMS.
-    // If sendSMS is called first and DB writes then fail, Claude's message
-    // history is missing this exchange. On the caller's next text, Claude
-    // loses context and may ask for info the customer already provided.
-    // Saving first means history is always consistent. If sendSMS then fails,
-    // the outer catch sends a fallback SMS — the customer gets a "technical
-    // issue" message rather than silence.
+    // Save to DB BEFORE sending the SMS — history stays consistent even if
+    // Twilio fails. See commit history for full explanation.
     await saveMessage(conversation.id, 'user', incomingText);
     await saveMessage(conversation.id, 'assistant', smsText);
     await incrementMessageCount(conversation.id);
-    await sendSMS(callerPhone, twilioNumber, smsText);
+
+    // BUG FIX: Guard against empty smsText before calling sendSMS.
+    // Claude is instructed to always include a goodbye message before the
+    // LEAD_CAPTURED signal, but if it emits only the signal with no visible
+    // text, smsText === ''. Twilio rejects empty bodies with a 400 error,
+    // which the outer catch turns into a "technical issue" fallback SMS.
+    // The customer's last message would be a confusing error rather than
+    // a proper goodbye — even though the lead was successfully captured.
+    if (smsText) {
+      await sendSMS(callerPhone, twilioNumber, smsText);
+    } else {
+      console.warn(`Empty smsText from Claude for conversation ${conversation.id} — skipping sendSMS`);
+    }
 
     // ── 9. Lead captured ───────────────────────────────────────────────────
     if (leadData) {
