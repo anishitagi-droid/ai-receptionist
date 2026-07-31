@@ -21,10 +21,11 @@ function client() {
  * @param {string} to   - Recipient phone number (E.164 format, e.g. +16305551234)
  * @param {string} from - Your Twilio number (E.164 format)
  * @param {string} body - Message text
+ * @param {object} [twilioClient] - Injectable Twilio client (for tests); defaults to client()
  */
-export async function sendSMS(to, from, body) {
+export async function sendSMS(to, from, body, twilioClient) {
   try {
-    const message = await client().messages.create({ to, from, body });
+    const message = await (twilioClient || client()).messages.create({ to, from, body });
     console.log(`SMS sent to ${to} — SID: ${message.sid}`);
     return message;
   } catch (err) {
@@ -41,7 +42,7 @@ export async function sendSMS(to, from, body) {
  * @param {object} leadData  - { name, issue, preferred_time }
  * @param {string} callerPhone - The caller's phone number
  */
-export async function notifyOwner(business, leadData, callerPhone) {
+export async function notifyOwner(business, leadData, callerPhone, twilioClient) {
   const name          = leadData.name          || 'Not provided';
   const issue         = leadData.issue         || 'Not specified';
   const preferredTime = leadData.preferred_time || 'No preference given';
@@ -51,49 +52,35 @@ export async function notifyOwner(business, leadData, callerPhone) {
   // These force UCS-2 SMS encoding (70 chars/segment instead of 160),
   // doubling Twilio costs and rendering as "?" on some older phones.
   // Plain ASCII keeps segments at 160 chars -- fits in 2 segments not 4.
-  const message =
-    `NEW LEAD - ${business.name}
-` +
-    `---
-` +
-    `Name: ${name}
-` +
-    `Phone: ${formattedCaller}
-` +
-    `Issue: ${issue}
-` +
-    `Best time: ${preferredTime}
-` +
-    `---
-` +
-    `Reply to reach them.`;
+  const message = `NEW LEAD - ${business.name}
+---
+Name: ${name}
+Phone: ${formattedCaller}
+Issue: ${issue}
+Best time: ${preferredTime}
+---
+Reply to reach them.`;
 
-  await sendSMS(business.owner_phone, business.twilio_number, message);
+  await sendSMS(business.owner_phone, business.twilio_number, message, twilioClient);
 }
 
-export async function notifyOwnerEmergency(business, reason, callerPhone) {
+export async function notifyOwnerEmergency(business, reason, callerPhone, twilioClient) {
   const formattedCaller = formatPhone(callerPhone);
 
-  const message =
-    `EMERGENCY - ${business.name}
-` +
-    `---
-` +
-    `Caller: ${formattedCaller}
-` +
-    `Reason: ${reason}
-` +
-    `---
-` +
-    `Call them back immediately.`;
+  const message = `EMERGENCY - ${business.name}
+---
+Caller: ${formattedCaller}
+Reason: ${reason}
+---
+Call them back immediately.`;
 
-  await sendSMS(business.owner_phone, business.twilio_number, message);
+  await sendSMS(business.owner_phone, business.twilio_number, message, twilioClient);
 }
 
 /**
  * Format a raw E.164 phone number as (XXX) XXX-XXXX for human readability.
  */
-function formatPhone(phone) {
+export function formatPhone(phone) {
   // Defensive guard: callerPhone normally always comes from Twilio's From
   // field on a real request, but NODE_ENV=development intentionally skips
   // signature validation for local testing, so malformed input CAN reach

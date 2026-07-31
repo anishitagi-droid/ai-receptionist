@@ -43,7 +43,7 @@ app.listen(PORT, () => {
 ║       AI Receptionist — Running          ║
 ╠══════════════════════════════════════════╣
 ║  Port:         ${String(PORT).padEnd(26)}║
-║  Environment:  ${(process.env.NODE_ENV || 'development').padEnd(26)}║
+║  Environment:  ${(process.env.NODE_ENV || 'unset (=production)').padEnd(26)}║
 ╠══════════════════════════════════════════╣
 ║  Endpoints:                              ║
 ║  POST /voice           (inbound call)    ║

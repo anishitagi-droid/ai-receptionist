@@ -268,6 +268,7 @@ ai-receptionist/
 │   │   └── sms.js               ← Outbound SMS + owner notifications
 │   └── db/
 │       └── index.js             ← All Supabase database operations
+├── test/                        ← Unit tests (Node's built-in test runner, no extra deps)
 ├── supabase/
 │   └── schema.sql               ← Run this once to set up your database
 ├── .env.example                 ← Template — copy to .env and fill in values
@@ -275,6 +276,39 @@ ai-receptionist/
 ├── package.json
 └── README.md
 ```
+
+---
+
+## Running tests
+
+```bash
+npm test
+```
+
+Covers the parsing/formatting logic that's actually worth unit-testing —
+`parseResponse`'s signal extraction, `buildSystemPrompt`, `formatPhone`, and
+the SMS-sending/owner-notification flow — using fake injected Anthropic/
+Twilio clients rather than hitting the real APIs. It does not cover
+`routes/sms.js` or `routes/voice.js` end to end (that would mean either real
+Twilio/Supabase credentials or mocking three services' worth of interacting
+state at once) or `fetch`-level Supabase calls in `db/index.js`.
+
+---
+
+## Known limitations
+
+- **A crash between responding to Twilio and finishing the background work
+  could silently drop a message.** `routes/sms.js` responds to Twilio with
+  an empty `<Response></Response>` immediately (Twilio's webhook timeout is
+  10 seconds, and the Claude call alone can take a few), then keeps
+  processing — saving the message, calling Claude, saving the reply,
+  sending the SMS — *after* the response is already sent. If the process
+  crashes or gets killed mid-deploy in that window, Twilio already got its
+  200 and won't retry, so the message is gone with nothing recorded. In
+  practice this window is a second or two per message and Railway deploys
+  are infrequent, so the realistic exposure is low, but there's no queue or
+  durable job system backing this — it's a synchronous in-process pipeline,
+  not a fault-tolerant one.
 
 ---
 

@@ -102,11 +102,12 @@ AS $$
 $$;
 
 -- ─── Sample business for local testing ───────────────────────────────────────
--- Update all three phone numbers before testing, then delete before going live
--- with a real client (or just leave it — inactive rows don't affect anything).
+-- Update all three phone numbers and set active=true before testing, then
+-- delete before going live with a real client (or just leave it — it's
+-- inserted with active=false, so it never matches a real Twilio number).
 INSERT INTO businesses (
   name, twilio_number, owner_phone, real_number,
-  business_type, services, service_area, hours, price_note
+  business_type, services, service_area, hours, price_note, active
 ) VALUES (
   'Aurora Plumbing Co.',
   '+16305550001',   -- ← Replace with your actual Twilio number
@@ -116,5 +117,6 @@ INSERT INTO businesses (
   'drain cleaning, water heater repair/replacement, leak detection, pipe repair, sump pump service, faucet/fixture installation',
   'Aurora, Naperville, Oswego, and surrounding Kane/DuPage County areas',
   'Mon-Fri 7am-7pm, Sat 8am-3pm, emergency service available 24/7',
-  'Free estimates on all jobs. Emergency after-hours rates apply.'
+  'Free estimates on all jobs. Emergency after-hours rates apply.',
+  false             -- ← Flip to true once you've replaced the numbers above
 );

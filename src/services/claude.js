@@ -27,7 +27,7 @@ const MODEL = 'claude-haiku-4-5-20251001';
  * This is the core of the product — it's what makes Claude act like
  * a knowledgeable receptionist for THIS specific business.
  */
-function buildSystemPrompt(business) {
+export function buildSystemPrompt(business) {
   const faqSection = business.custom_faqs
     ? `\nFREQUENTLY ASKED QUESTIONS:\n${business.custom_faqs}`
     : '';
@@ -76,7 +76,7 @@ Do NOT include LEAD_CAPTURED, SPAM_DETECTED, or ESCALATE in the visible part of 
  * Parse Claude's raw response for any signals embedded after the SMS text.
  * Returns the clean SMS text and any extracted data.
  */
-function parseResponse(rawText) {
+export function parseResponse(rawText) {
   const lines = rawText.trim().split('\n');
   const visibleText = [];
   let leadData = null;
@@ -118,15 +118,17 @@ function parseResponse(rawText) {
  * @param {object} business   - Business config row from Supabase
  * @param {Array}  history    - Array of {role, content} messages from DB
  * @param {string} newMessage - The latest incoming message from the caller
+ * @param {object} [client]   - Injectable Anthropic client (for tests); defaults to ai()
  * @returns {object} { smsText, leadData, isSpam, escalation }
  */
-export async function getChatResponse(business, history, newMessage) {
+export async function getChatResponse(business, history, newMessage, client) {
+  const anthropic = client || ai();
   const messages = [
     ...history.map(m => ({ role: m.role, content: m.content })),
     { role: 'user', content: newMessage },
   ];
 
-  const response = await ai().messages.create({
+  const response = await anthropic.messages.create({
     model: MODEL,
     max_tokens: 300, // SMS replies should be short — 300 tokens is plenty
     system: buildSystemPrompt(business),
