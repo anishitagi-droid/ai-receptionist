@@ -1,5 +1,7 @@
 # AI Receptionist
 
+[![CI](https://github.com/anishitagi-droid/ai-receptionist/actions/workflows/ci.yml/badge.svg)](https://github.com/anishitagi-droid/ai-receptionist/actions)
+
 Automated missed-call SMS system for local service businesses. When a call goes unanswered, the caller gets a text within 60 seconds. Claude handles the conversation, collects lead info, and notifies the business owner.
 
 ---
